@@ -5,9 +5,9 @@
 #include <SPI.h>
 
 // LoRaWAN Keys and Identifiers
-static const u1_t PROGMEM DEVEUI[8] = { 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x };
-static const u1_t PROGMEM APPEUI[8] = { 0x, 0x, 0x, 0x, 0x, 0x, 0x1, 0x }; // Replace with actual AppEUI
-static const u1_t PROGMEM APPKEY[16] = { 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x };
+static const u1_t PROGMEM DEVEUI[8] = { 0x , 0x ...x8 }; //Replace with actual DevEUI
+static const u1_t PROGMEM APPEUI[8] = { 0x , 0x ...x8 }; // Replace with actual AppEUI 
+static const u1_t PROGMEM APPKEY[16] = {0x , 0x ...x16 }; // Replace with actual AppKey
 
 void os_getArtEui(u1_t* buf) { memcpy_P(buf, APPEUI, 8); }
 void os_getDevEui(u1_t* buf) { memcpy_P(buf, DEVEUI, 8); }
@@ -23,8 +23,8 @@ const uint8_t SHARP_VO_PIN = 35;
 // Sensor Initialization
 GP2YDustSensor dustSensor(GP2YDustSensorType::GP2Y1010AU0F, SHARP_LED_PIN, SHARP_VO_PIN);
 
-// Default TX Interval Definition (30 seconds)
-static unsigned long TX_INTERVAL_SECONDS = 30;
+// Default TX Interval Definition (60 seconds)
+static unsigned long TX_INTERVAL_SECONDS = 60;
 #define TX_INTERVAL (TX_INTERVAL_SECONDS * 1000000UL)  // Convert seconds to microseconds
 
 // LMIC Configuration
@@ -36,7 +36,7 @@ const lmic_pinmap lmic_pins = {
 };
 
 // Sensor Names Array
-const char* sensor_names[] = { "movement", "air_quality", "", "dust" };
+const char* sensor_names[] = { "movement", "air_quality", "mq7", "dust" };
 
 // Data Buffer for Payload
 static char data[256];
@@ -90,6 +90,12 @@ void restoreSessionState() {
     LMIC.devaddr = sessionData.devaddr;
     memcpy(LMIC.nwkKey, sessionData.nwkKey, sizeof(LMIC.nwkKey));
     memcpy(LMIC.artKey, sessionData.artKey, sizeof(LMIC.artKey));
+}
+
+void printHex2(unsigned v) {
+    v &= 0xff;
+    if (v < 16) Serial.print('0');
+    Serial.print(v, HEX);
 }
 
 void setTxInterval(unsigned long intervalSeconds) {
