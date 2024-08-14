@@ -1,0 +1,294 @@
+#include <EEPROM.h>
+#include <GP2YDustSensor.h>
+#include <lmic.h>
+#include <hal/hal.h>
+#include <SPI.h>
+
+// LoRaWAN Keys and Identifiers
+static const u1_t PROGMEM DEVEUI[8] = { 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x };
+static const u1_t PROGMEM APPEUI[8] = { 0x, 0x, 0x, 0x, 0x, 0x, 0x1, 0x }; // Replace with actual AppEUI
+static const u1_t PROGMEM APPKEY[16] = { 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x, 0x };
+
+void os_getArtEui(u1_t* buf) { memcpy_P(buf, APPEUI, 8); }
+void os_getDevEui(u1_t* buf) { memcpy_P(buf, DEVEUI, 8); }
+void os_getDevKey(u1_t* buf) { memcpy_P(buf, APPKEY, 16); }
+
+// Pin Definitions
+const int pirPin = 36;
+const int mq135Pin = 34;
+const int mq7Pin = 39;
+const uint8_t SHARP_LED_PIN = 32;
+const uint8_t SHARP_VO_PIN = 35;
+
+// Sensor Initialization
+GP2YDustSensor dustSensor(GP2YDustSensorType::GP2Y1010AU0F, SHARP_LED_PIN, SHARP_VO_PIN);
+
+// Default TX Interval Definition (30 seconds)
+static unsigned long TX_INTERVAL_SECONDS = 30;
+#define TX_INTERVAL (TX_INTERVAL_SECONDS * 1000000UL)  // Convert seconds to microseconds
+
+// LMIC Configuration
+const lmic_pinmap lmic_pins = {
+  .nss = 5,
+  .rxtx = LMIC_UNUSED_PIN,
+  .rst = 17,
+  .dio = { 2, 14, LMIC_UNUSED_PIN },
+};
+
+// Sensor Names Array
+const char* sensor_names[] = { "movement", "air_quality", "", "dust" };
+
+// Data Buffer for Payload
+static char data[256];
+
+// Job Structure
+static osjob_t sendjob;
+
+// Enable verbose debugging
+#define LMIC_DEBUG_LEVEL 2
+
+// Session state storage in EEPROM
+#define EEPROM_SIZE 64
+#define EEPROM_ADDRESS 0
+
+// Struct to store session data
+struct SessionData {
+    u4_t netid;
+    devaddr_t devaddr;
+    u1_t nwkKey[16];
+    u1_t artKey[16];
+    bool joined;
+};
+
+SessionData sessionData;
+
+// Fallback mechanism counters
+RTC_DATA_ATTR static unsigned int joinAttempts = 0;
+RTC_DATA_ATTR static unsigned int wakeupCounter = 0;
+#define MAX_WAKEUPS_BEFORE_REJOIN 1440  // Rejoin after 24 hours if waking up every minute
+
+void saveSessionToEEPROM() {
+    EEPROM.put(EEPROM_ADDRESS, sessionData);
+    EEPROM.commit();
+}
+
+void loadSessionFromEEPROM() {
+    EEPROM.get(EEPROM_ADDRESS, sessionData);
+}
+
+void saveSessionState() {
+    sessionData.netid = LMIC.netid;
+    sessionData.devaddr = LMIC.devaddr;
+    memcpy(sessionData.nwkKey, LMIC.nwkKey, sizeof(LMIC.nwkKey));
+    memcpy(sessionData.artKey, LMIC.artKey, sizeof(LMIC.artKey));
+    sessionData.joined = true;
+    saveSessionToEEPROM();
+}
+
+void restoreSessionState() {
+    LMIC.netid = sessionData.netid;
+    LMIC.devaddr = sessionData.devaddr;
+    memcpy(LMIC.nwkKey, sessionData.nwkKey, sizeof(LMIC.nwkKey));
+    memcpy(LMIC.artKey, sessionData.artKey, sizeof(LMIC.artKey));
+}
+
+void setTxInterval(unsigned long intervalSeconds) {
+    TX_INTERVAL_SECONDS = intervalSeconds;
+    Serial.print(F("TX interval set to "));
+    Serial.print(TX_INTERVAL_SECONDS);
+    Serial.println(F(" seconds"));
+}
+
+void onEvent(ev_t ev) {
+    Serial.print(os_getTime());
+    Serial.print(": ");
+    switch (ev) {
+        case EV_SCAN_TIMEOUT: 
+            Serial.println(F("EV_SCAN_TIMEOUT")); 
+            break;
+
+        case EV_BEACON_FOUND: 
+            Serial.println(F("EV_BEACON_FOUND")); 
+            break;
+
+        case EV_BEACON_MISSED: 
+            Serial.println(F("EV_BEACON_MISSED")); 
+            break;
+
+        case EV_BEACON_TRACKED: 
+            Serial.println(F("EV_BEACON_TRACKED")); 
+            break;
+
+        case EV_JOINING: 
+            Serial.println(F("EV_JOINING")); 
+            break;
+
+        case EV_JOINED:
+            Serial.println(F("EV_JOINED"));
+            u4_t netid;
+            devaddr_t devaddr;
+            u1_t nwkKey[16], artKey[16];
+            LMIC_getSessionKeys(&netid, &devaddr, nwkKey, artKey);
+            Serial.print("netid: "); Serial.println(netid, DEC);
+            Serial.print("devaddr: "); Serial.println(devaddr, HEX);
+            Serial.print("AppSKey: ");
+            for (size_t i = 0; i < sizeof(artKey); ++i) {
+                if (i != 0) Serial.print("-");
+                printHex2(artKey[i]);
+            }
+            Serial.println();
+            Serial.print("NwkSKey: ");
+            for (size_t i = 0; i < sizeof(nwkKey); ++i) {
+                if (i != 0) Serial.print("-");
+                printHex2(nwkKey[i]);
+            }
+            Serial.println();
+            LMIC_setLinkCheckMode(0);
+            sessionData.joined = true;
+            saveSessionState();
+            joinAttempts = 0; // Reset join attempts after successful join
+            break;
+
+        case EV_JOIN_FAILED: 
+            Serial.println(F("EV_JOIN_FAILED")); 
+            sessionData.joined = false;
+            joinAttempts++;
+            break;
+
+        case EV_REJOIN_FAILED: 
+            Serial.println(F("EV_REJOIN_FAILED")); 
+            sessionData.joined = false;
+            break;
+
+        case EV_TXCOMPLETE:
+            Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+            if (LMIC.txrxFlags & TXRX_ACK) 
+                Serial.println(F("Received ack"));
+            if (LMIC.dataLen) {
+                Serial.print(F("Received ")); 
+                Serial.print(LMIC.dataLen); 
+                Serial.println(F(" bytes of payload"));
+
+                // Decode downlink payload for new interval
+                if (LMIC.dataLen == 1) {
+                    unsigned long intervalSeconds = LMIC.frame[LMIC.dataBeg];
+                    Serial.print(F("Single byte interval: "));
+                    Serial.println(intervalSeconds);
+                    setTxInterval(intervalSeconds);
+                } else if (LMIC.dataLen == 2) {
+                    unsigned long intervalSeconds = (LMIC.frame[LMIC.dataBeg] << 8) | LMIC.frame[LMIC.dataBeg + 1];
+                    Serial.print(F("Two-byte interval: "));
+                    Serial.println(intervalSeconds);
+                    setTxInterval(intervalSeconds);
+                }
+            }
+
+            // Enter deep sleep
+            Serial.println(F("Entering deep sleep..."));
+            ESP.deepSleep(TX_INTERVAL); // Sleep for the defined interval (in microseconds)
+            break;
+
+        case EV_LOST_TSYNC: 
+            Serial.println(F("EV_LOST_TSYNC")); 
+            break;
+
+        case EV_RESET: 
+            Serial.println(F("EV_RESET")); 
+            break;
+
+        case EV_RXCOMPLETE: 
+            Serial.println(F("EV_RXCOMPLETE")); 
+            break;
+
+        case EV_LINK_DEAD: 
+            Serial.println(F("EV_LINK_DEAD")); 
+            break;
+
+        case EV_LINK_ALIVE: 
+            Serial.println(F("EV_LINK_ALIVE")); 
+            break;
+
+        case EV_TXSTART: 
+            Serial.println(F("EV_TXSTART")); 
+            break;
+
+        case EV_TXCANCELED: 
+            Serial.println(F("EV_TXCANCELED")); 
+            break;
+
+        case EV_RXSTART: 
+            // No print to save energy
+            break;
+
+        case EV_JOIN_TXCOMPLETE: 
+            Serial.println(F("EV_JOIN_TXCOMPLETE: no JoinAccept")); 
+            sessionData.joined = false;
+            break;
+
+        default: 
+            Serial.print(F("Unknown event: ")); 
+            Serial.println((unsigned)ev); 
+            break;
+    }
+}
+
+void do_send(osjob_t* j) {
+    if (LMIC.opmode & OP_TXRXPEND) {
+        Serial.println(F("OP_TXRXPEND, not sending"));
+    } else {
+        dustSensor.begin();
+        int pirValue = digitalRead(pirPin);
+        int mq135Value = analogRead(mq135Pin);
+        int mq7Value = analogRead(mq7Pin);
+        int dust = dustSensor.getDustDensity();
+
+        const int num_sensors = sizeof(sensor_names) / sizeof(sensor_names[0]);
+        const float values[] = { pirValue, mq135Value, mq7Value, dust };
+
+        int data_len = 0;
+        for (int i = 0; i < num_sensors; i++) {
+            int n = snprintf(data + data_len, sizeof(data) - data_len, "%s=%.2f,", sensor_names[i], values[i]);
+            if (n >= 0 && data_len + n < sizeof(data)) {
+                data_len += n;
+            } else {
+                break; // Error: not enough space in buffer
+            }
+        }
+
+        LMIC_setTxData2(1, (uint8_t*)data, strlen(data), 0);
+        Serial.print(F("Packet queued: ")); Serial.println(data);
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println(F("Starting"));
+
+    pinMode(pirPin, INPUT);
+    pinMode(mq135Pin, INPUT);
+    pinMode(mq7Pin, INPUT);
+
+    EEPROM.begin(EEPROM_SIZE);  // Initialize EEPROM with defined size
+    loadSessionFromEEPROM();    // Load session data from EEPROM
+
+    os_init();
+
+    if (sessionData.joined && joinAttempts == 0 && wakeupCounter < MAX_WAKEUPS_BEFORE_REJOIN) {
+        Serial.println(F("Restoring session state..."));
+        restoreSessionState();  // Restore session state if already joined
+        wakeupCounter++;
+    } else {
+        Serial.println(F("Joining network..."));
+        LMIC_reset();  // Reset LMIC only if not joined or if rejoining is necessary
+        joinAttempts = 0;
+        wakeupCounter = 0;
+    }
+
+    LMIC_setClockError(MAX_CLOCK_ERROR * 1 / 100);  // Optional: Compensate for clock error
+
+    do_send(&sendjob);
+}
+
+void loop() {
+    os_runloop_once();
+}
