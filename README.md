@@ -2,6 +2,13 @@
 
 This project demonstrates how to implement a LoRaWAN device using the LMIC library with support for deep sleep and session persistence across deep sleep cycles and full power cycles. The device periodically collects sensor data and transmits it over a LoRaWAN network. To conserve power, the device enters deep sleep between transmissions. It also saves the network session state to non-volatile memory to avoid rejoining the network after every wake-up.
 
+
+
+![WhatsApp Image 2024-08-15 at 01 40 01](https://github.com/user-attachments/assets/7542691a-f426-455a-807d-e46ec4e08e25)
+
+
+
+
 ## Features
 
 - **Deep Sleep:** The device enters deep sleep between data transmissions to conserve power.
